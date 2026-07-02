@@ -69,11 +69,17 @@ class CameraReader:
         self._height = height
         for spec in specs:
             cap = cv2.VideoCapture(spec.device)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             if not cap.isOpened():
                 self.close()
                 raise RuntimeError(f"failed to open camera {spec.name}: {spec.device}")
+            for _ in range(30):
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.max() > 0:
+                    break
+                time.sleep(0.05)
             self._captures[spec.name] = cap
 
     @property

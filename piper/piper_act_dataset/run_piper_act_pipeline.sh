@@ -190,7 +190,7 @@ IMAGE_HEIGHT="${IMAGE_HEIGHT:-480}"
 OVERWRITE="${OVERWRITE:-0}"
 
 # 只做环境检查和参数展示，不启动采集。
-DRY_RUN="${DRY_RUN:-0}"
+DRY_RUN="${DRY_RUN:-1}"
 
 print_config() {
   cat <<EOF
