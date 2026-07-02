@@ -144,10 +144,15 @@ def bimanual_vector(
     return np.concatenate([left if left is not None else zeros, right if right is not None else zeros]).astype(np.float32)
 
 
+def episode_file_path(dataset_dir: str, episode_idx: int) -> str:
+    episode_name = f"episode_{episode_idx}"
+    return os.path.join(dataset_dir, episode_name, f"{episode_name}.hdf5")
+
+
 def next_episode_index(dataset_dir: str) -> int:
     os.makedirs(dataset_dir, exist_ok=True)
     for idx in range(100000):
-        if not os.path.exists(os.path.join(dataset_dir, f"episode_{idx}.hdf5")):
+        if not os.path.exists(episode_file_path(dataset_dir, idx)):
             return idx
     raise RuntimeError("too many episodes in dataset directory")
 
@@ -239,7 +244,7 @@ def capture_episode(args: argparse.Namespace) -> str:
     camera_reader = CameraReader(camera_specs, args.image_width, args.image_height) if camera_specs else None
 
     episode_idx = args.episode_idx if args.episode_idx is not None else next_episode_index(args.dataset_dir)
-    episode_path = os.path.join(args.dataset_dir, f"episode_{episode_idx}.hdf5")
+    episode_path = episode_file_path(args.dataset_dir, episode_idx)
     if os.path.exists(episode_path) and not args.overwrite:
         raise FileExistsError(f"{episode_path} already exists; pass --overwrite to replace it")
 
@@ -294,14 +299,14 @@ def capture_episode(args: argparse.Namespace) -> str:
     timestamps_ns = np.array(timestamp_rows, dtype=np.int64)
     image_arrays = {name: np.stack(rows).astype(np.uint8) for name, rows in image_rows.items()}
 
-    os.makedirs(args.dataset_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(episode_path), exist_ok=True)
     save_episode(episode_path, qpos, qvel, action, effort, timestamps_ns, image_arrays, args.fps, args.action_source, args.pair_mode)
     return episode_path
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-dir", required=True, help="Directory for episode_N.hdf5 files")
+    parser.add_argument("--dataset-dir", required=True, help="Task directory; episodes are saved as episode_N/episode_N.hdf5")
     parser.add_argument("--episode-idx", type=int, default=None, help="Episode index; auto-selected if omitted")
     parser.add_argument("--episode-len", type=int, default=1000, help="Number of timesteps")
     parser.add_argument("--fps", type=float, default=50.0, help="Sampling frequency; ALOHA commonly uses 50Hz")

@@ -19,6 +19,12 @@ from record_episodes_piper import CameraReader, CameraSpec, capture_episode, par
 from preview_episode import analyze_episode, export_preview, print_report
 
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+DEFAULT_RAW_DIR = os.path.join(DATA_DIR, "raw")
+DEFAULT_READABLE_DIR = os.path.join(DATA_DIR, "readable")
+
+
 def check_can_interface(can_name: Optional[str]) -> None:
     if not can_name:
         return
@@ -83,6 +89,15 @@ def sidecar_path(episode_path: str) -> str:
     return root + ".qa.json"
 
 
+def episode_name(episode_path: str) -> str:
+    return os.path.splitext(os.path.basename(episode_path))[0]
+
+
+def readable_preview_dir(episode_path: str, task: Optional[str]) -> str:
+    task_name = task or os.path.basename(os.path.dirname(os.path.dirname(episode_path)))
+    return os.path.join(DEFAULT_READABLE_DIR, task_name, episode_name(episode_path), "previews")
+
+
 def write_sidecar(episode_path: str, analysis: dict, keep: Optional[bool], note: str) -> None:
     payload = {
         "episode": episode_path,
@@ -124,8 +139,8 @@ def hard_quality_warning(analysis: dict) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-dir", default="datasets/piper_act_collection")
-    parser.add_argument("--task", default=None, help="Optional task subdirectory under --dataset-dir")
+    parser.add_argument("--dataset-dir", default=DEFAULT_RAW_DIR)
+    parser.add_argument("--task", default=None, help="Task subdirectory under --dataset-dir, e.g. press_ring")
     parser.add_argument("--episode-idx", type=int, default=None)
     parser.add_argument("--duration", type=float, default=30.0, help="Recording duration in seconds")
     parser.add_argument("--episode-len", type=int, default=None, help="Override duration-derived frame count")
@@ -177,7 +192,7 @@ def main() -> None:
     hard_failed = hard_quality_warning(analysis)
 
     if args.export_preview:
-        preview_dir = args.preview_dir or os.path.join(os.path.dirname(episode_path), "previews", os.path.splitext(os.path.basename(episode_path))[0])
+        preview_dir = args.preview_dir or readable_preview_dir(episode_path, args.task)
         export_preview(episode_path, preview_dir, video=args.export_video)
 
     if args.no_ask_keep:

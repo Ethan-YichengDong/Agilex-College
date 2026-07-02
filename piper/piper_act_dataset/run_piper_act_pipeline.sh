@@ -144,11 +144,11 @@ fi
 # 你最常修改的是这些参数
 # =========================
 
-# 数据保存目录。每次采集会生成 episode_N.hdf5。
-# 默认保存在 Agilex-College/datasets/piper_act。
+# 数据保存目录。每次采集会生成 <task>/episode_N/episode_N.hdf5。
+# 默认保存在 piper/piper_act_dataset/data/raw。
 # 推荐在 Agilex-College 根目录运行本脚本；这样默认值和你传入的
 # DATASET_DIR=datasets/test 都是相对于仓库根目录的路径。
-DATASET_DIR="${DATASET_DIR:-datasets/piper_act}"
+DATASET_DIR="${DATASET_DIR:-${SCRIPT_DIR}/data/raw}"
 
 # episode 编号。留空则自动选择下一个可用编号。
 EPISODE_IDX="${EPISODE_IDX:-}"
@@ -345,7 +345,7 @@ main() {
   echo
   echo "To inspect one episode:"
   echo "  conda activate agilex"
-  echo "  python ${INSPECTOR} ${DATASET_DIR}/episode_<N>.hdf5"
+  echo "  python ${INSPECTOR} ${DATASET_DIR}/<task>/episode_<N>/episode_<N>.hdf5"
 }
 
 main "$@"

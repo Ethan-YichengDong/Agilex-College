@@ -42,6 +42,34 @@ NAMES = [
     "right_gripper",
 ]
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data")
+
+
+def infer_task_and_episode(episode: str) -> tuple:
+    episode_abs = os.path.abspath(episode)
+    episode_name = os.path.splitext(os.path.basename(episode_abs))[0]
+    episode_dir = os.path.basename(os.path.dirname(episode_abs))
+    task_name = os.path.basename(os.path.dirname(os.path.dirname(episode_abs)))
+    if episode_dir == episode_name:
+        return task_name, episode_name
+    return os.path.basename(os.path.dirname(episode_abs)), episode_name
+
+
+def default_output_dir(episode: str) -> str:
+    episode_abs = os.path.abspath(episode)
+    raw_root = os.path.join(DATA_DIR, "raw")
+    try:
+        common = os.path.commonpath([episode_abs, raw_root])
+    except ValueError:
+        common = ""
+    if common == raw_root:
+        task_name, episode_name = infer_task_and_episode(episode_abs)
+        return os.path.join(DATA_DIR, "readable", task_name, episode_name)
+
+    episode_base = os.path.splitext(os.path.basename(episode_abs))[0]
+    return os.path.join(os.path.dirname(episode_abs), f"{episode_base}_readable")
+
 
 def json_value(value: Any) -> Any:
     if isinstance(value, np.generic):
@@ -184,8 +212,7 @@ def main() -> None:
     parser.add_argument("--all-images", action="store_true", help="Export every camera frame instead of sampled frames")
     args = parser.parse_args()
 
-    episode_base = os.path.splitext(os.path.basename(args.episode))[0]
-    out_dir = args.out_dir or os.path.join(os.path.dirname(args.episode), f"{episode_base}_readable")
+    out_dir = args.out_dir or default_output_dir(args.episode)
     export_episode(args.episode, out_dir, max(1, args.sample_count), args.all_images)
     print(f"exported readable episode to {out_dir}")
 

@@ -19,6 +19,34 @@ In this workflow, the master arm is only the teleoperation device. The dataset
 is centered on the slave arm because the slave arm is the robot that actually
 interacts with the scene.
 
+## Project Data Layout
+
+Keep raw recordings and derived formats under this directory:
+
+```text
+piper/piper_act_dataset/data/
+├── raw/
+│   └── <task_name>/
+│       └── episode_0/
+│           ├── episode_0.hdf5
+│           └── episode_0.qa.json
+├── readable/
+│   └── <task_name>/
+│       └── episode_0/
+│           ├── metadata.json
+│           ├── robot_timeline.csv
+│           ├── summary.json
+│           └── images/
+└── robotwin_pi0/
+    └── <task_name>/
+        └── episode_0/
+            ├── episode_0.hdf5
+            └── instructions.json
+```
+
+`raw` is the source of truth from collection. `readable` and `robotwin_pi0` are
+derived outputs that can be regenerated from kept raw episodes.
+
 ## Actual ALOHA Layout
 
 The original ALOHA `record_episodes.py` stores one episode per HDF5 file:
@@ -118,7 +146,7 @@ One master-slave pair, stored in the left 7 dimensions:
 ```bash
 cd Agilex-College
 python3 piper/piper_act_dataset/record_episodes_piper.py \
-  --dataset-dir datasets/piper_act_test \
+  --dataset-dir piper/piper_act_dataset/data/raw/press_ring \
   --episode-idx 0 \
   --episode-len 1000 \
   --fps 50 \
@@ -132,7 +160,7 @@ Two master-slave pairs, with cameras:
 ```bash
 cd Agilex-College
 python3 piper/piper_act_dataset/record_episodes_piper.py \
-  --dataset-dir datasets/piper_act_test \
+  --dataset-dir piper/piper_act_dataset/data/raw/press_ring \
   --episode-len 1000 \
   --fps 50 \
   --pair-mode dual \
@@ -150,7 +178,8 @@ They are only used when `--action-source master_ctrl`.
 Inspect an episode:
 
 ```bash
-python3 piper/piper_act_dataset/inspect_episode.py datasets/piper_act_test/episode_0.hdf5
+python3 piper/piper_act_dataset/inspect_episode.py \
+  piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
 ```
 
 Or use the commented pipeline launcher:
@@ -179,6 +208,12 @@ Dry-run without connecting to CAN:
 
 ```bash
 DRY_RUN=1 bash piper/piper_act_dataset/run_piper_act_pipeline.sh
+```
+
+Find the usable camera node after reconnecting a USB camera:
+
+```bash
+bash piper/piper_act_dataset/find_cameras.sh
 ```
 
 ## Recommended Workflow

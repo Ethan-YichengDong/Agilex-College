@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/_act_common.sh"
 activate_agilex
 cd "${REPO_ROOT}"
 
-DATASET_DIR="${DATASET_DIR:-datasets/piper_act_collection}"
+DATASET_DIR="${DATASET_DIR:-${SCRIPT_DIR}/data/raw}"
 EPISODE="${1:-}"
 CAN="${CAN:-can0}"
 SOURCE="${SOURCE:-qpos}"
