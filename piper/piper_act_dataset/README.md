@@ -139,91 +139,185 @@ pip install -e /path/to/piper_sdk
 This environment also has a small `sitecustomize.py` compatibility shim so the
 local `piper_sdk` can import `typing.Literal` while running on Python 3.6.
 
-## Example Commands
+## Operator Entry Point
 
-One master-slave pair, stored in the left 7 dimensions:
-
-```bash
-cd Agilex-College
-python3 piper/piper_act_dataset/record_episodes_piper.py \
-  --dataset-dir piper/piper_act_dataset/data/raw/press_ring \
-  --episode-idx 0 \
-  --episode-len 1000 \
-  --fps 50 \
-  --pair-mode single \
-  --action-source slave_next_qpos \
-  --left-slave-can can0
-```
-
-Two master-slave pairs, with cameras:
+Use `collect_act_episode.sh` for normal repeated collection. It is the single
+operator-facing launcher for this directory:
 
 ```bash
 cd Agilex-College
-python3 piper/piper_act_dataset/record_episodes_piper.py \
-  --dataset-dir piper/piper_act_dataset/data/raw/press_ring \
-  --episode-len 1000 \
-  --fps 50 \
-  --pair-mode dual \
-  --action-source slave_next_qpos \
-  --left-slave-can can0 \
-  --right-slave-can can1 \
-  --camera cam_high=/dev/video0 \
-  --camera cam_left_wrist=/dev/video2 \
-  --camera cam_right_wrist=/dev/video4
+bash piper/piper_act_dataset/collect_act_episode.sh
 ```
 
-The master CAN arguments are not needed in the default `slave_next_qpos` mode.
-They are only used when `--action-source master_ctrl`.
+The shell wrapper calls `collect_episode.py`, which performs preflight checks,
+records one or more episodes, runs technical quality analysis, optionally
+exports camera previews, and writes a `episode_N.qa.json` keep/reject sidecar
+for each episode.
 
-Inspect an episode:
+The lower-level recorder, `record_episodes_piper.py`, remains available for
+debugging and scripted integrations, but operators should normally use
+`collect_act_episode.sh`.
+
+## End-to-End Process
+
+1. Configure the Piper arms.
+   - Teaching input arm: `MasterSlaveConfig(0xFA, 0, 0, 0)`.
+   - Motion output arm: `MasterSlaveConfig(0xFC, 0, 0, 0)`.
+2. Bring up CAN.
+   ```bash
+   CAN=can0 bash piper/piper_act_dataset/can_up.sh
+   ```
+3. Verify physical master-slave following before recording.
+4. Find the camera device if a USB camera was reconnected.
+   ```bash
+   bash piper/piper_act_dataset/find_cameras.sh
+   ```
+5. Record a short pilot episode.
+   ```bash
+   TASK=press_ring \
+   DURATION=5 \
+   NO_CAMERA=1 \
+   bash piper/piper_act_dataset/collect_act_episode.sh
+   ```
+6. Inspect the generated HDF5 file.
+   ```bash
+   python3 piper/piper_act_dataset/inspect_episode.py \
+     piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
+   ```
+7. Add cameras and collect pilot episodes with images.
+   ```bash
+   TASK=press_ring \
+   DURATION=15 \
+   CAMERAS="cam_high=/dev/video4" \
+   bash piper/piper_act_dataset/collect_act_episode.sh
+   ```
+8. Review the console quality report, preview images, and `episode_N.qa.json`.
+   Keep only episodes with correct task behavior, meaningful arm motion, valid
+   timing, and usable images.
+9. Repeat collection until the task has enough kept episodes.
+10. Export readable or training-specific derived formats only after raw episodes
+    are verified.
+
+`raw` episodes are the source of truth. The `readable` and `robotwin_pi0`
+outputs are derived files that can be regenerated.
+
+## Repeated Collection Commands
+
+Single master-slave pair, stored in the left 7 dimensions:
+
+```bash
+TASK=press_ring \
+DURATION=15 \
+LEFT_SLAVE_CAN=can0 \
+CAMERAS="cam_high=/dev/video4" \
+bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+Fast repeated collection without the keep/reject prompt:
+
+```bash
+NO_ASK_KEEP=1 \
+TASK=press_ring \
+DURATION=15 \
+LEFT_SLAVE_CAN=can0 \
+CAMERAS="cam_high=/dev/video4" \
+bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+Collect exactly `episode_0` through `episode_50` in one run:
+
+```bash
+TASK=press_ring \
+EPISODE_IDX=0 \
+NUM_EPISODES=51 \
+DURATION=15 \
+LEFT_SLAVE_CAN=can0 \
+CAMERAS="cam_high=/dev/video4" \
+bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+If `EPISODE_IDX` is omitted, each repeat automatically uses the next available
+episode index under `data/raw/<task_name>/`.
+
+Two master-slave pairs:
+
+```bash
+PAIR_MODE=dual \
+TASK=press_ring \
+DURATION=15 \
+LEFT_SLAVE_CAN=can0 \
+RIGHT_SLAVE_CAN=can1 \
+CAMERAS="cam_high=/dev/video0 cam_left_wrist=/dev/video2 cam_right_wrist=/dev/video4" \
+bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+Dry-run without recording:
+
+```bash
+DRY_RUN=1 bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+Disable cameras:
+
+```bash
+NO_CAMERA=1 bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+Useful environment variables:
+
+```text
+TASK              task subdirectory under data/raw; default press_ring
+DURATION          recording length in seconds; default 15
+EPISODE_LEN       explicit frame count; overrides DURATION when set
+FPS               sampling frequency; default 50
+PAIR_MODE         single or dual; default single
+ACTION_SOURCE     slave_next_qpos, slave_current_qpos, or master_ctrl
+LEFT_SLAVE_CAN    default can0
+RIGHT_SLAVE_CAN   required only for PAIR_MODE=dual
+CAMERAS           space-separated name=device pairs
+NO_CAMERA         set to 1 to collect robot state only
+IMAGE_WIDTH       default 320
+IMAGE_HEIGHT      default 240
+EXPORT_PREVIEW    set to 1 by default
+EXPORT_VIDEO      set to 1 to also export MP4 preview
+SKIP_PREFLIGHT    set to 1 to skip CAN/camera checks
+NO_ASK_KEEP       set to 1 for unattended repeated collection
+DRY_RUN           set to 1 to check config without recording
+```
+
+## Checking and Exporting Episodes
+
+Inspect HDF5 structure:
 
 ```bash
 python3 piper/piper_act_dataset/inspect_episode.py \
   piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
 ```
 
-Or use the commented pipeline launcher:
+Preview the latest episode:
 
 ```bash
-cd Agilex-College
-bash piper/piper_act_dataset/run_piper_act_pipeline.sh
+bash piper/piper_act_dataset/preview_act_episode.sh
 ```
 
-Pipeline launcher examples:
+Export one episode into readable JSON, CSV, and sampled JPG files:
 
 ```bash
-# One master-slave pair
-PAIR_MODE=single \
-LEFT_SLAVE_CAN=can0 \
-bash piper/piper_act_dataset/run_piper_act_pipeline.sh
-
-# Two master-slave pairs
-PAIR_MODE=dual \
-LEFT_SLAVE_CAN=can0 \
-RIGHT_SLAVE_CAN=can1 \
-bash piper/piper_act_dataset/run_piper_act_pipeline.sh
+python3 piper/piper_act_dataset/export_episode_readable.py \
+  piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
 ```
 
-Dry-run without connecting to CAN:
+Convert one verified raw episode to RobotWin Pi0/Pi0.5 format:
 
 ```bash
-DRY_RUN=1 bash piper/piper_act_dataset/run_piper_act_pipeline.sh
+python3 piper/piper_act_dataset/convert_episode_robotwin_pi0.py \
+  piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5 \
+  --instruction "press the ring"
 ```
 
-Find the usable camera node after reconnecting a USB camera:
+Replay a recorded trajectory in dry-run mode first:
 
 ```bash
-bash piper/piper_act_dataset/find_cameras.sh
+DRY_RUN=1 bash piper/piper_act_dataset/replay_act_episode.sh \
+  piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
 ```
-
-## Recommended Workflow
-
-1. Configure Piper master/slave mode with `MasterSlaveConfig(0xFA, 0, 0, 0)` for
-   the teaching input arm and `MasterSlaveConfig(0xFC, 0, 0, 0)` for the motion
-   output arm.
-2. Verify physical following without recording.
-3. Record one short episode without cameras and inspect the HDF5 file.
-4. Add cameras and check image shape/dtype.
-5. Collect several pilot episodes and verify the HDF5 file. In the default
-   `slave_next_qpos` mode, `action` should look like `qpos` shifted one frame
-   forward.

@@ -98,6 +98,14 @@ def readable_preview_dir(episode_path: str, task: Optional[str]) -> str:
     return os.path.join(DEFAULT_READABLE_DIR, task_name, episode_name(episode_path), "previews")
 
 
+def preview_output_dir(episode_path: str, args: argparse.Namespace) -> str:
+    if not args.preview_dir:
+        return readable_preview_dir(episode_path, args.task)
+    if args.num_episodes > 1:
+        return os.path.join(args.preview_dir, episode_name(episode_path))
+    return args.preview_dir
+
+
 def write_sidecar(episode_path: str, analysis: dict, keep: Optional[bool], note: str) -> None:
     payload = {
         "episode": episode_path,
@@ -137,11 +145,52 @@ def hard_quality_warning(analysis: dict) -> bool:
     return True
 
 
+def print_config(capture_args: SimpleNamespace, num_episodes: int) -> None:
+    print("Resolved collection config:")
+    print(f"  dataset_dir={capture_args.dataset_dir}")
+    print(f"  num_episodes={num_episodes}")
+    print(f"  episode_idx={capture_args.episode_idx if capture_args.episode_idx is not None else 'next available'}")
+    print(f"  episode_len={capture_args.episode_len}")
+    print(f"  fps={capture_args.fps}")
+    print(f"  can={capture_args.left_slave_can}")
+    print(f"  cameras={capture_args.camera or 'none'}")
+    print(f"  image_size={capture_args.image_width}x{capture_args.image_height}")
+
+
+def collect_one_episode(args: argparse.Namespace, dataset_dir: str, offset: int) -> str:
+    capture_args = build_capture_args(args, dataset_dir)
+    if args.episode_idx is not None:
+        capture_args.episode_idx = args.episode_idx + offset
+
+    if args.num_episodes > 1:
+        print()
+        print(f"=== Episode {offset + 1}/{args.num_episodes} ===")
+
+    episode_path = capture_episode(capture_args)
+    print(f"Recorded: {episode_path}")
+
+    analysis = analyze_episode(episode_path)
+    print_report(analysis)
+    hard_failed = hard_quality_warning(analysis)
+
+    if args.export_preview:
+        export_preview(episode_path, preview_output_dir(episode_path, args), video=args.export_video)
+
+    if args.no_ask_keep:
+        keep = False if hard_failed else None
+        note = "auto technical reject" if hard_failed else ""
+    else:
+        keep, note = ask_keep()
+    write_sidecar(episode_path, analysis, keep, note)
+    return episode_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-dir", default=DEFAULT_RAW_DIR)
     parser.add_argument("--task", default=None, help="Task subdirectory under --dataset-dir, e.g. press_ring")
     parser.add_argument("--episode-idx", type=int, default=None)
+    parser.add_argument("--num-episodes", type=int, default=1, help="Number of episodes to collect in this run")
     parser.add_argument("--duration", type=float, default=30.0, help="Recording duration in seconds")
     parser.add_argument("--episode-len", type=int, default=None, help="Override duration-derived frame count")
     parser.add_argument("--fps", type=float, default=50.0)
@@ -163,16 +212,12 @@ def main() -> None:
     parser.add_argument("--no-ask-keep", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Show resolved config and run preflight only")
     args = parser.parse_args()
+    if args.num_episodes < 1:
+        raise SystemExit("--num-episodes must be >= 1")
 
     dataset_dir = os.path.join(args.dataset_dir, args.task) if args.task else args.dataset_dir
     capture_args = build_capture_args(args, dataset_dir)
-    print("Resolved collection config:")
-    print(f"  dataset_dir={capture_args.dataset_dir}")
-    print(f"  episode_len={capture_args.episode_len}")
-    print(f"  fps={capture_args.fps}")
-    print(f"  can={capture_args.left_slave_can}")
-    print(f"  cameras={capture_args.camera or 'none'}")
-    print(f"  image_size={capture_args.image_width}x{capture_args.image_height}")
+    print_config(capture_args, args.num_episodes)
 
     if not args.skip_preflight:
         check_can_interface(args.left_slave_can)
@@ -184,23 +229,8 @@ def main() -> None:
         print("Dry run complete; no episode recorded.")
         return
 
-    episode_path = capture_episode(capture_args)
-    print(f"Recorded: {episode_path}")
-
-    analysis = analyze_episode(episode_path)
-    print_report(analysis)
-    hard_failed = hard_quality_warning(analysis)
-
-    if args.export_preview:
-        preview_dir = args.preview_dir or readable_preview_dir(episode_path, args.task)
-        export_preview(episode_path, preview_dir, video=args.export_video)
-
-    if args.no_ask_keep:
-        keep = False if hard_failed else None
-        note = "auto technical reject" if hard_failed else ""
-    else:
-        keep, note = ask_keep()
-    write_sidecar(episode_path, analysis, keep, note)
+    for offset in range(args.num_episodes):
+        collect_one_episode(args, dataset_dir, offset)
 
 
 if __name__ == "__main__":
