@@ -7,7 +7,7 @@ The exporter creates:
   metadata.json        root attrs and dataset shapes/dtypes
   summary.json         compact robot/camera statistics
   robot_timeline.csv   one row per timestep with timestamp, qpos, qvel, action
-  images/<camera>/     sampled JPG frames, or every frame with --all-images
+  images/<camera>/     every camera frame by default, or sampled frames with --sample-images
 """
 
 import argparse
@@ -129,20 +129,30 @@ def write_robot_csv(path: str, qpos: np.ndarray, qvel: np.ndarray, action: np.nd
             writer.writerow(row)
 
 
-def frame_indices(length: int, sample_count: int, all_images: bool) -> Iterable[int]:
-    if all_images or length <= sample_count:
+def frame_indices(length: int, sample_count: int, sample_images: bool) -> Iterable[int]:
+    if not sample_images or length <= sample_count:
         return range(length)
     return np.linspace(0, length - 1, sample_count, dtype=int).tolist()
 
 
-def export_images(root: h5py.File, out_dir: str, sample_count: int, all_images: bool) -> Dict[str, Any]:
+def export_images(root: h5py.File, out_dir: str, sample_count: int, sample_images: bool) -> Dict[str, Any]:
     image_group = root.get("observations/images")
     if image_group is None:
-        return {"camera_names": [], "exported_frames": {}}
+        return {
+            "camera_names": [],
+            "image_export_mode": "none",
+            "image_sample_count": sample_count,
+            "exported_frames": {},
+        }
     if cv2 is None:
         raise RuntimeError("opencv-python is required to export images")
 
-    result: Dict[str, Any] = {"camera_names": list(image_group.keys()), "exported_frames": {}}
+    result: Dict[str, Any] = {
+        "camera_names": list(image_group.keys()),
+        "image_export_mode": "sampled" if sample_images else "all",
+        "image_sample_count": sample_count,
+        "exported_frames": {},
+    }
     image_root = os.path.join(out_dir, "images")
     os.makedirs(image_root, exist_ok=True)
 
@@ -151,7 +161,7 @@ def export_images(root: h5py.File, out_dir: str, sample_count: int, all_images: 
         camera_dir = os.path.join(image_root, camera)
         os.makedirs(camera_dir, exist_ok=True)
         written = []
-        for idx in frame_indices(len(images), sample_count, all_images):
+        for idx in frame_indices(len(images), sample_count, sample_images):
             rgb = images[idx]
             filename = f"{camera}_{idx:06d}.jpg"
             cv2.imwrite(os.path.join(camera_dir, filename), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
@@ -164,7 +174,7 @@ def export_images(root: h5py.File, out_dir: str, sample_count: int, all_images: 
     return result
 
 
-def export_episode(episode: str, out_dir: str, sample_count: int, all_images: bool) -> None:
+def export_episode(episode: str, out_dir: str, sample_count: int, sample_images: bool) -> None:
     os.makedirs(out_dir, exist_ok=True)
     with h5py.File(episode, "r") as root:
         qpos = root["observations/qpos"][:]
@@ -197,7 +207,7 @@ def export_episode(episode: str, out_dir: str, sample_count: int, all_images: bo
                 "std": float(dt_ms.std()),
             }
 
-        image_summary = export_images(root, out_dir, sample_count, all_images)
+        image_summary = export_images(root, out_dir, sample_count, sample_images)
         summary.update(image_summary)
         write_json(os.path.join(out_dir, "summary.json"), summary)
 
@@ -208,13 +218,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("episode", help="Path to episode_N.hdf5")
     parser.add_argument("--out-dir", default=None, help="Directory to write readable files")
-    parser.add_argument("--sample-count", type=int, default=24, help="Number of image frames per camera to export by default")
-    parser.add_argument("--all-images", action="store_true", help="Export every camera frame instead of sampled frames")
+    parser.add_argument("--sample-images", action="store_true", help="Export only sampled image frames instead of every camera frame")
+    parser.add_argument("--sample-count", type=int, default=24, help="Number of image frames per camera to export when --sample-images is set")
     args = parser.parse_args()
 
     out_dir = args.out_dir or default_output_dir(args.episode)
-    export_episode(args.episode, out_dir, max(1, args.sample_count), args.all_images)
+    export_episode(args.episode, out_dir, max(1, args.sample_count), args.sample_images)
     print(f"exported readable episode to {out_dir}")
+    if args.sample_images:
+        print(f"exported sampled images only ({max(1, args.sample_count)} per camera)")
 
 
 if __name__ == "__main__":

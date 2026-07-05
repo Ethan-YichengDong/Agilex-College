@@ -3,3 +3,4 @@ __pycache__/
 *.hdf5
 *.jpg
 *.json
+data/

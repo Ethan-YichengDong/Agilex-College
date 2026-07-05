@@ -38,6 +38,7 @@ ports are required.
 
 import argparse
 import os
+import threading
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -61,26 +62,57 @@ class CameraSpec:
 
 
 class CameraReader:
-    def __init__(self, specs: Iterable[CameraSpec], width: int, height: int) -> None:
+    def __init__(self, specs: Iterable[CameraSpec], width: int, height: int, fps: float) -> None:
         if cv2 is None:
             raise RuntimeError("opencv-python is required when --camera is used")
         self._captures: Dict[str, "cv2.VideoCapture"] = {}
+        self._threads: List[threading.Thread] = []
+        self._frames: Dict[str, np.ndarray] = {}
+        self._lock = threading.Lock()
+        self._running = True
         self._width = width
         self._height = height
+        self._fps = fps
         for spec in specs:
-            cap = cv2.VideoCapture(spec.device)
+            cap = cv2.VideoCapture(spec.device, cv2.CAP_V4L2)
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(cv2.CAP_PROP_FPS, fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             if not cap.isOpened():
                 self.close()
                 raise RuntimeError(f"failed to open camera {spec.name}: {spec.device}")
-            for _ in range(30):
-                ok, frame = cap.read()
-                if ok and frame is not None and frame.max() > 0:
-                    break
-                time.sleep(0.05)
             self._captures[spec.name] = cap
+            thread = threading.Thread(target=self._reader_loop, args=(spec.name, cap), daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            with self._lock:
+                ready = all(name in self._frames for name in self._captures)
+            if ready:
+                break
+            time.sleep(0.02)
+        with self._lock:
+            missing = [name for name in self._captures if name not in self._frames]
+        if missing:
+            self.close()
+            raise RuntimeError(f"failed to read initial frame from camera(s): {missing}")
+
+        for name, cap in self._captures.items():
+            actual_fps = cap.get(cv2.CAP_PROP_FPS)
+            print(f"Camera {name}: requested_fps={fps:.1f}, driver_fps={actual_fps:.1f}")
+
+    def _reader_loop(self, name: str, cap: "cv2.VideoCapture") -> None:
+        while self._running:
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                with self._lock:
+                    self._frames[name] = frame
+            else:
+                time.sleep(0.005)
 
     @property
     def names(self) -> List[str]:
@@ -92,15 +124,20 @@ class CameraReader:
 
     def read(self) -> Dict[str, np.ndarray]:
         images = {}
-        for name, cap in self._captures.items():
-            ok, frame_bgr = cap.read()
-            if not ok:
-                raise RuntimeError(f"failed to read frame from camera {name}")
+        with self._lock:
+            frames = {name: frame.copy() for name, frame in self._frames.items()}
+        for name in self._captures:
+            frame_bgr = frames.get(name)
+            if frame_bgr is None:
+                raise RuntimeError(f"no frame available from camera {name}")
             frame_bgr = cv2.resize(frame_bgr, (self._width, self._height))
             images[name] = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         return images
 
     def close(self) -> None:
+        self._running = False
+        for thread in self._threads:
+            thread.join(timeout=0.5)
         for cap in self._captures.values():
             cap.release()
 
@@ -178,12 +215,14 @@ def save_episode(
     timestamps_ns: np.ndarray,
     images: Dict[str, np.ndarray],
     fps: float,
+    target_fps: float,
     action_source: str,
     pair_mode: str,
 ) -> None:
     with h5py.File(path, "w", rdcc_nbytes=1024**2 * 2) as root:
         root.attrs["sim"] = False
         root.attrs["fps"] = fps
+        root.attrs["target_fps"] = target_fps
         root.attrs["robot"] = "agilex_piper"
         root.attrs["state_dim"] = 14
         root.attrs["vector_order"] = "left_j1..j6,left_gripper,right_j1..j6,right_gripper"
@@ -208,12 +247,23 @@ def save_episode(
                 )
 
 
-def finite_difference_qvel(qpos: np.ndarray, dt: float) -> np.ndarray:
+def finite_difference_qvel(qpos: np.ndarray, timestamps_ns: np.ndarray) -> np.ndarray:
     qvel = np.zeros_like(qpos, dtype=np.float32)
     if len(qpos) > 1:
-        qvel[1:] = (qpos[1:] - qpos[:-1]) / dt
+        dt = np.diff(timestamps_ns.astype(np.float64)) / 1e9
+        dt = np.maximum(dt, 1e-6)
+        qvel[1:] = (qpos[1:] - qpos[:-1]) / dt[:, None]
         qvel[0] = qvel[1]
     return qvel
+
+
+def measured_fps(timestamps_ns: np.ndarray, fallback_fps: float) -> float:
+    if len(timestamps_ns) < 2:
+        return fallback_fps
+    elapsed = (float(timestamps_ns[-1]) - float(timestamps_ns[0])) / 1e9
+    if elapsed <= 0:
+        return fallback_fps
+    return float((len(timestamps_ns) - 1) / elapsed)
 
 
 def build_action_from_slave_qpos(qpos: np.ndarray, action_source: str) -> np.ndarray:
@@ -241,7 +291,7 @@ def capture_episode(args: argparse.Namespace) -> str:
         right_master = None
 
     camera_specs = parse_camera_specs(args.camera)
-    camera_reader = CameraReader(camera_specs, args.image_width, args.image_height) if camera_specs else None
+    camera_reader = CameraReader(camera_specs, args.image_width, args.image_height, args.camera_fps) if camera_specs else None
 
     episode_idx = args.episode_idx if args.episode_idx is not None else next_episode_index(args.dataset_dir)
     episode_path = episode_file_path(args.dataset_dir, episode_idx)
@@ -294,13 +344,31 @@ def capture_episode(args: argparse.Namespace) -> str:
         action = np.stack(master_action_rows).astype(np.float32)
     else:
         action = build_action_from_slave_qpos(qpos, args.action_source)
-    qvel = finite_difference_qvel(qpos, dt)
     effort = np.stack(effort_rows).astype(np.float32)
     timestamps_ns = np.array(timestamp_rows, dtype=np.int64)
+    qvel = finite_difference_qvel(qpos, timestamps_ns)
+    actual_fps = measured_fps(timestamps_ns, args.fps)
+    if actual_fps < args.fps * 0.9:
+        print(
+            f"WARNING: requested fps={args.fps:.2f}, measured fps={actual_fps:.2f}. "
+            "The HDF5 qvel and fps metadata use measured timestamps."
+        )
     image_arrays = {name: np.stack(rows).astype(np.uint8) for name, rows in image_rows.items()}
 
     os.makedirs(os.path.dirname(episode_path), exist_ok=True)
-    save_episode(episode_path, qpos, qvel, action, effort, timestamps_ns, image_arrays, args.fps, args.action_source, args.pair_mode)
+    save_episode(
+        episode_path,
+        qpos,
+        qvel,
+        action,
+        effort,
+        timestamps_ns,
+        image_arrays,
+        actual_fps,
+        args.fps,
+        args.action_source,
+        args.pair_mode,
+    )
     return episode_path
 
 
@@ -347,6 +415,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image-width", type=int, default=640)
     parser.add_argument("--image-height", type=int, default=480)
+    parser.add_argument("--camera-fps", type=float, default=60.0, help="Requested V4L2 camera FPS")
     parser.add_argument("--print-every", type=int, default=50)
     return parser
 

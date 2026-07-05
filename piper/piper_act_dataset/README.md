@@ -150,9 +150,44 @@ bash piper/piper_act_dataset/collect_act_episode.sh
 ```
 
 The shell wrapper calls `collect_episode.py`, which performs preflight checks,
-records one or more episodes, runs technical quality analysis, optionally
-exports camera previews, and writes a `episode_N.qa.json` keep/reject sidecar
-for each episode.
+records one or more episodes, runs technical quality analysis, and writes a
+`episode_N.qa.json` keep/reject sidecar for each episode. Image viewing is done
+later by extracting the raw HDF5 file. Quality checks only print feedback and
+data ranges; they do not force rejection.
+
+Before the first episode and after each episode, the default behavior is
+`PARK_METHOD=master_home`: the launcher sends the SDK
+`ReqMasterArmMoveToHome(2)` request so the leader and follower return to zero
+together, waits, then sends `ReqMasterArmMoveToHome(0)` to restore master-slave
+mode for the next demonstration. This is the preferred shared-`can0` path
+because it does not broadcast new `MasterSlaveConfig` role commands during the
+normal collection loop. By default, the script also polls follower feedback and
+requires the joints to be near zero before recording starts or continues to the
+next trajectory.
+
+The default sampling target remains `FPS=50`. If the console reports about
+30Hz, the recorder loop or CAN/SDK feedback path is falling behind the 20ms
+target period; saved `qvel` and HDF5 `fps` metadata are computed from actual
+timestamps so the mismatch is visible instead of hidden.
+
+When cameras are enabled, the recorder requests `CAMERA_FPS=60` and reads each
+camera in a background thread. This prevents a 30Hz camera `read()` call from
+blocking the 50Hz robot sampling loop.
+
+`ReqMasterArmMoveToHome` is documented in the SDK as firmware V1.7-4 and later.
+On this shared-`can0` setup, the installed SDK reports only a partial firmware
+string such as `S-V1`, but hardware testing confirmed that
+`ReqMasterArmMoveToHome` works. The operator scripts therefore allow unknown
+firmware by default and rely on live zero-pose feedback verification after the
+home command.
+
+Do not send `MasterSlaveConfig` role-assignment commands while both arms are
+powered/connected on shared `can0`. That command is sent as CAN ID `0x470`; on
+the current shared-bus setup it can affect both arms, causing drop or reversed
+leader/follower roles. `restore_leader_follower.sh` now detects this shared-bus
+case and uses `ReqMasterArmMoveToHome(0)` instead, which restores the existing
+master-slave/teaching mode without reassigning roles. To repair already
+reversed roles, configure one physical arm at a time.
 
 The lower-level recorder, `record_episodes_piper.py`, remains available for
 debugging and scripted integrations, but operators should normally use
@@ -160,42 +195,77 @@ debugging and scripted integrations, but operators should normally use
 
 ## End-to-End Process
 
-1. Configure the Piper arms.
+1. Configure the Piper arms before collection.
    - Teaching input arm: `MasterSlaveConfig(0xFA, 0, 0, 0)`.
    - Motion output arm: `MasterSlaveConfig(0xFC, 0, 0, 0)`.
+   - If both arms share `can0`, configure only one powered/connected arm at a
+     time; do not send both role commands while both arms are on the bus.
 2. Bring up CAN.
    ```bash
    CAN=can0 bash piper/piper_act_dataset/can_up.sh
    ```
 3. Verify physical master-slave following before recording.
-4. Find the camera device if a USB camera was reconnected.
+4. Check that the shared-`can0` home/restore command is supported.
+   ```bash
+   MASTER_HOME_CHECK=1 bash piper/piper_act_dataset/request_master_home.sh
+   ```
+   This checks the installed SDK and queries firmware without sending the
+   `ReqMasterArmMoveToHome(2)` motion command. Firmware should be `S-V1.7-4` or
+   newer for the automatic shared-`can0` reset path.
+5. Run the supervised shared-`can0` validation once before official collection.
+   ```bash
+   bash piper/piper_act_dataset/validate_collection_pipeline.sh
+   ```
+   This performs the SDK/firmware check, runs zero+restore, pauses for a manual
+   leader-follower direction check, verifies that follower feedback moves while
+   the leader is moved, resets again, records one short no-camera pilot episode,
+   and validates the resulting HDF5 structure.
+6. Find the camera device if a USB camera was reconnected.
    ```bash
    bash piper/piper_act_dataset/find_cameras.sh
    ```
-5. Record a short pilot episode.
+   The script classifies readable streams and prints a ready-to-copy
+   `CAMERAS="cam_high=... cam_left_wrist=... cam_right_wrist=..."` command.
+   For RealSense D435 cameras at `IMAGE_WIDTH=320 IMAGE_HEIGHT=240`, prefer
+   streams reported as `RGB candidate`. Skip readable `424`-wide streams,
+   because those are usually depth/IR streams rather than RGB.
+   A RealSense stable `by-id` path may contain `Depth_Camera_435` because that
+   is the product name of the device; it does not by itself identify the stream
+   as depth. The finder prefers the color-interface `by-path` name when it can.
+7. Record a short pilot episode.
    ```bash
    TASK=press_ring \
    DURATION=5 \
    NO_CAMERA=1 \
    bash piper/piper_act_dataset/collect_act_episode.sh
    ```
-6. Inspect the generated HDF5 file.
+   By default, this first runs the `master_home` reset cycle so the pilot starts
+   from zero with master-slave mode restored.
+8. Inspect the generated HDF5 file.
    ```bash
    python3 piper/piper_act_dataset/inspect_episode.py \
      piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
    ```
-7. Add cameras and collect pilot episodes with images.
+9. Add cameras and collect pilot episodes with images.
    ```bash
    TASK=press_ring \
    DURATION=15 \
-   CAMERAS="cam_high=/dev/video4" \
+   NO_CAMERA=0 \
+   CAMERA_FPS=60 \
+   CAMERAS="cam_high=/dev/video4 cam_left_wrist=/dev/video10 cam_right_wrist=/dev/video16" \
    bash piper/piper_act_dataset/collect_act_episode.sh
    ```
-8. Review the console quality report, preview images, and `episode_N.qa.json`.
+10. Let the script run the `master_home` reset cycle before episode 1 and after
+   each episode: `ReqMasterArmMoveToHome(2)` for leader+follower zero return,
+   wait, then `ReqMasterArmMoveToHome(0)` to restore master-slave mode. Re-check
+   physical following before collecting a large batch.
+   If zero verification fails, the script stops before recording the next
+   trajectory.
+11. Review the console quality report and `episode_N.qa.json`.
    Keep only episodes with correct task behavior, meaningful arm motion, valid
    timing, and usable images.
-9. Repeat collection until the task has enough kept episodes.
-10. Export readable or training-specific derived formats only after raw episodes
+12. Repeat collection until the task has enough kept episodes.
+13. Export readable or training-specific derived formats only after raw episodes
     are verified.
 
 `raw` episodes are the source of truth. The `readable` and `robotwin_pi0`
@@ -247,6 +317,8 @@ TASK=press_ring \
 DURATION=15 \
 LEFT_SLAVE_CAN=can0 \
 RIGHT_SLAVE_CAN=can1 \
+LEFT_LEADER_CAN=can2 \
+RIGHT_LEADER_CAN=can3 \
 CAMERAS="cam_high=/dev/video0 cam_left_wrist=/dev/video2 cam_right_wrist=/dev/video4" \
 bash piper/piper_act_dataset/collect_act_episode.sh
 ```
@@ -257,16 +329,29 @@ Dry-run without recording:
 DRY_RUN=1 bash piper/piper_act_dataset/collect_act_episode.sh
 ```
 
+Dry-run the supervised validation wrapper:
+
+```bash
+DRY_RUN=1 bash piper/piper_act_dataset/validate_collection_pipeline.sh
+```
+
 Disable cameras:
 
 ```bash
 NO_CAMERA=1 bash piper/piper_act_dataset/collect_act_episode.sh
 ```
 
+Disable automatic reset only for debugging:
+
+```bash
+PREPARE_BEFORE=0 PARK_AFTER=0 bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
 Useful environment variables:
 
 ```text
-TASK              task subdirectory under data/raw; default press_ring
+TASK              task subdirectory under data/raw; default test
+NUM_EPISODES      number of episodes to collect in this run; default 1
 DURATION          recording length in seconds; default 15
 EPISODE_LEN       explicit frame count; overrides DURATION when set
 FPS               sampling frequency; default 50
@@ -278,11 +363,149 @@ CAMERAS           space-separated name=device pairs
 NO_CAMERA         set to 1 to collect robot state only
 IMAGE_WIDTH       default 320
 IMAGE_HEIGHT      default 240
-EXPORT_PREVIEW    set to 1 by default
-EXPORT_VIDEO      set to 1 to also export MP4 preview
+CAMERA_FPS        requested camera FPS; default 60
+PREPARE_BEFORE    set to 1 by default; reset to zero before episode 1
+PARK_AFTER        set to 1 by default; return slave arm(s) to zero after each episode
+PARK_METHOD       master_home by default; use can_park only for direct CAN-control debugging
+MASTER_HOME_CAN   default can0; CAN bus for ReqMasterArmMoveToHome
+MASTER_HOME_WAIT  seconds to wait after ReqMasterArmMoveToHome(2); default 6
+MASTER_HOME_RESTORE set to 1 by default; send ReqMasterArmMoveToHome(0) after zero return
+MASTER_HOME_PREFLIGHT set to 1 by default; check SDK/firmware before collection
+MASTER_HOME_CHECK set to 1 in request_master_home.sh to check SDK/firmware support
+MASTER_HOME_FIRMWARE_TIMEOUT firmware query timeout for master_home checks; default 3
+MASTER_HOME_ALLOW_UNKNOWN_FIRMWARE set to 1 by default on this setup because
+                  the SDK returns partial firmware text but hardware testing passed
+MASTER_HOME_VERIFY_ZERO set to 1 by default; poll follower feedback after zero return
+MASTER_HOME_ZERO_TIMEOUT seconds to wait for zero verification; default 8
+MASTER_HOME_JOINT_TOLERANCE max absolute joint error in radians; default 0.08
+MASTER_HOME_VERIFY_GRIPPER set to 1 to also verify gripper position
+MASTER_HOME_GRIPPER_TOLERANCE gripper zero tolerance in meters; default 0.01
+PARK_SECONDS      zero-return interpolation time; default 5
+PARK_MOVE_SPEED   zero-return move speed percentage; default 20
+PARK_GRIPPER_EFFORT zero-return gripper effort; default 1000
+PARK_NO_GRIPPER   set to 1 to park joints only
+PARK_TRY_CAN_MODE set to 1 by default; try switching to CAN mode before parking
+PARK_TIMEOUT      zero-return control timeout in seconds; default 5
+RESTORE_LEADER_FOLLOWER set to 0 by default; shared-can0 restore is unsafe
+RESTORE_ROLE      leader by default; use both only after hardware validation
+RESTORE_ASSUME_SINGLE_ARM_ON_BUS set to 1 only when exactly one physical arm is
+                  powered/connected to the target CAN bus for role recovery
+LEFT_LEADER_CAN   leader/input arm CAN port for restore, e.g. can1
+                  defaults to LEFT_SLAVE_CAN for shared-bus single-pair setups
+RIGHT_LEADER_CAN  right leader/input arm CAN port for dual mode
+LEFT_FOLLOWER_CAN follower/output arm CAN port for restore; defaults to LEFT_SLAVE_CAN
+RIGHT_FOLLOWER_CAN right follower/output arm CAN port for dual mode
 SKIP_PREFLIGHT    set to 1 to skip CAN/camera checks
 NO_ASK_KEEP       set to 1 for unattended repeated collection
 DRY_RUN           set to 1 to check config without recording
+RUN_PILOT         set to 0 in validate_collection_pipeline.sh to stop before recording
+VALIDATION_DURATION pilot duration for validate_collection_pipeline.sh; default 3
+VERIFY_LEADER_FOLLOWING set to 1 by default; sample follower feedback while moving leader
+LEADER_FOLLOW_VERIFY_DURATION seconds to sample follower feedback; default 4
+LEADER_FOLLOW_MIN_RANGE minimum follower joint range in radians; default 0.03
+```
+
+Manual shared-can0 zero return and restore for the leader/follower pair:
+
+```bash
+MASTER_HOME_CHECK=1 bash piper/piper_act_dataset/request_master_home.sh
+```
+
+On this setup, unknown firmware is allowed by default because the SDK returns
+partial firmware text while the hardware command has been verified. To force a
+strict firmware parse, set `MASTER_HOME_ALLOW_UNKNOWN_FIRMWARE=0`.
+
+```bash
+bash piper/piper_act_dataset/request_master_home.sh
+```
+
+That runs this cycle:
+
+```text
+ReqMasterArmMoveToHome(2)  leader and follower return-to-zero together
+wait MASTER_HOME_WAIT
+verify follower joint feedback is near zero
+ReqMasterArmMoveToHome(0)  restore master-slave mode
+```
+
+The zero verifier is enabled by default for the cycle command. Disable it only
+for diagnosis:
+
+```bash
+MASTER_HOME_VERIFY_ZERO=0 bash piper/piper_act_dataset/request_master_home.sh
+```
+
+Send only one SDK master-home request:
+
+```bash
+MASTER_HOME_CYCLE=0 MASTER_HOME_MODE=both_zero bash piper/piper_act_dataset/request_master_home.sh
+MASTER_HOME_CYCLE=0 MASTER_HOME_MODE=restore bash piper/piper_act_dataset/request_master_home.sh
+```
+
+Manual direct CAN-control zero return fallback:
+
+```bash
+PARK_METHOD=can_park bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+Use `park_piper_zero.sh` directly only for supervised debugging. It tries to put
+the arm into CAN-control mode and can fight the connected master on shared
+`can0`.
+
+Manual zero return for a specific CAN port:
+
+```bash
+CAN=can1 bash piper/piper_act_dataset/park_piper_zero.sh
+```
+
+Manual zero return for two slave arms:
+
+```bash
+PAIR_MODE=dual \
+LEFT_SLAVE_CAN=can0 \
+RIGHT_SLAVE_CAN=can1 \
+bash piper/piper_act_dataset/park_piper_zero.sh
+```
+
+Manual restore of leader-follower teaching mode on shared `can0`:
+
+```bash
+CAN=can0 \
+bash piper/piper_act_dataset/restore_leader_follower.sh
+```
+
+On shared `can0`, that wrapper sends `ReqMasterArmMoveToHome(0)`. It restores
+the existing master-slave relationship after a zero return, but it does not
+repair already reversed roles.
+
+If the leader/follower roles are reversed, stop using shared-bus restore and
+recover by configuring one physical arm at a time:
+
+```bash
+# Only the intended follower/output arm is powered or connected to can0.
+RESTORE_ROLE=follower \
+RESTORE_ASSUME_SINGLE_ARM_ON_BUS=1 \
+CAN=can0 \
+bash piper/piper_act_dataset/restore_leader_follower.sh
+
+# Only the intended leader/input arm is powered or connected to can0.
+RESTORE_ROLE=leader \
+RESTORE_ASSUME_SINGLE_ARM_ON_BUS=1 \
+CAN=can0 \
+bash piper/piper_act_dataset/restore_leader_follower.sh
+```
+
+After that, reconnect both arms and power the follower first, then the leader.
+Verify physical leader-to-follower motion before collecting the next episode.
+
+If the leader and follower are on different CAN interfaces, one-command restore
+is allowed:
+
+```bash
+LEFT_LEADER_CAN=can1 \
+LEFT_FOLLOWER_CAN=can0 \
+RESTORE_ROLE=both \
+bash piper/piper_act_dataset/restore_leader_follower.sh
 ```
 
 ## Checking and Exporting Episodes
@@ -294,17 +517,38 @@ python3 piper/piper_act_dataset/inspect_episode.py \
   piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
 ```
 
+Strictly validate Piper ACT HDF5 structure:
+
+```bash
+python3 piper/piper_act_dataset/inspect_episode.py \
+  piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5 \
+  --validate-act \
+  --expected-camera cam_high \
+  --expected-camera cam_left_wrist \
+  --expected-camera cam_right_wrist \
+  --require-images
+```
+
 Preview the latest episode:
 
 ```bash
 bash piper/piper_act_dataset/preview_act_episode.sh
 ```
 
-Export one episode into readable JSON, CSV, and sampled JPG files:
+Export one episode into readable JSON, CSV, and full JPG image frames:
 
 ```bash
 python3 piper/piper_act_dataset/export_episode_readable.py \
   piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5
+```
+
+By default this writes every saved camera timestep under `readable/images`.
+For a small preview export only, use `--sample-images`:
+
+```bash
+python3 piper/piper_act_dataset/export_episode_readable.py \
+  piper/piper_act_dataset/data/raw/press_ring/episode_0/episode_0.hdf5 \
+  --sample-images
 ```
 
 Convert one verified raw episode to RobotWin Pi0/Pi0.5 format:

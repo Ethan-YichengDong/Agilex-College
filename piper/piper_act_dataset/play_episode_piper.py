@@ -88,13 +88,23 @@ def ensure_can_mode(piper: C_PiperInterface_V2, move_speed: int, timeout: float,
             "Exit teaching/master-slave mode first, or retry with --try-can-mode."
         )
 
+    print(f"Arm ctrl_mode is {status.ctrl_mode}; trying to exit teaching mode before CAN control.")
+    piper.EmergencyStop(0x01)
+    time.sleep(1.0)
+    piper.EmergencyStop(0x02)
+    time.sleep(1.0)
+
     deadline = time.time() + timeout
     while time.time() < deadline:
         piper.ModeCtrl(0x01, 0x01, move_speed, 0x00)
         time.sleep(0.05)
         if piper.GetArmStatus().arm_status.ctrl_mode == 1:
             return
-    raise RuntimeError("failed to switch arm to CAN mode")
+    raise RuntimeError(
+        "failed to switch arm to CAN mode. If the log shows SEND_MESSAGE_FAILED, "
+        "the CAN socket could not transmit frames; check arm power, CAN wiring, "
+        "the selected CAN interface, and whether candump shows Piper feedback."
+    )
 
 
 def enable_arm(piper: C_PiperInterface_V2, move_speed: int, include_gripper: bool, timeout: float) -> None:
