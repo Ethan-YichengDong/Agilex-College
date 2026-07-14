@@ -22,7 +22,7 @@ except ImportError:
     cv2 = None
 
 
-LEFT_NAMES = ["j1", "j2", "j3", "j4", "j5", "j6", "gripper"]
+SIDE_NAMES = ["j1", "j2", "j3", "j4", "j5", "j6", "gripper"]
 
 
 def _as_float_list(values: np.ndarray) -> list:
@@ -54,13 +54,19 @@ def analyze_episode(path: str, camera: Optional[str] = None) -> Dict[str, Any]:
         qvel = root["observations/qvel"][:]
         action = root["action"][:]
         timestamps_ns = root["observations/timestamp_ns"][:] if "observations/timestamp_ns" in root else None
+        attrs = {key: _json_value(value) for key, value in root.attrs.items()}
+        pair_mode = attrs.get("pair_mode", "single")
+        active_side = attrs.get("single_arm_side", "left") if pair_mode == "single" else "left"
 
         left = qpos[:, :7]
-        ranges = np.ptp(left, axis=0)
-        qvel_max_abs = np.max(np.abs(qvel[:, :7]), axis=0)
+        right = qpos[:, 7:]
+        left_ranges = np.ptp(left, axis=0)
+        right_ranges = np.ptp(right, axis=0)
+        active_ranges = right_ranges if active_side == "right" else left_ranges
         result: Dict[str, Any] = {
             "path": path,
-            "attrs": {key: _json_value(value) for key, value in root.attrs.items()},
+            "attrs": attrs,
+            "active_side": active_side,
             "qpos_shape": list(qpos.shape),
             "qvel_shape": list(qvel.shape),
             "action_shape": list(action.shape),
@@ -68,9 +74,16 @@ def analyze_episode(path: str, camera: Optional[str] = None) -> Dict[str, Any]:
             "action_dtype": str(action.dtype),
             "left_min": _as_float_list(left.min(axis=0)),
             "left_max": _as_float_list(left.max(axis=0)),
-            "left_range": _as_float_list(ranges),
-            "left_qvel_max_abs": _as_float_list(qvel_max_abs),
-            "right_side_max_abs": float(np.max(np.abs(qpos[:, 7:]))),
+            "left_range": _as_float_list(left_ranges),
+            "left_qvel_max_abs": _as_float_list(np.max(np.abs(qvel[:, :7]), axis=0)),
+            "right_min": _as_float_list(right.min(axis=0)),
+            "right_max": _as_float_list(right.max(axis=0)),
+            "right_range": _as_float_list(right_ranges),
+            "right_qvel_max_abs": _as_float_list(np.max(np.abs(qvel[:, 7:]), axis=0)),
+            "active_range": _as_float_list(active_ranges),
+            "inactive_side_max_abs": float(
+                np.max(np.abs(qpos[:, 7:])) if active_side == "left" else np.max(np.abs(qpos[:, :7]))
+            ),
             "action_shift_max_err": float(np.max(np.abs(action[:-1] - qpos[1:]))) if len(qpos) > 1 else 0.0,
         }
 
@@ -111,11 +124,11 @@ def _json_value(value: Any) -> Any:
 
 
 def quality_flags(result: Dict[str, Any]) -> Dict[str, bool]:
-    ranges = np.array(result["left_range"], dtype=np.float32)
+    ranges = np.array(result["active_range"], dtype=np.float32)
     flags = {
         "has_robot_rows": result["qpos_shape"][0] > 0 and result["qpos_shape"][1] == 14,
         "action_is_next_qpos": result["action_shift_max_err"] < 1e-6,
-        "single_right_side_zero": result["right_side_max_abs"] < 1e-6,
+        "single_inactive_side_zero": result["inactive_side_max_abs"] < 1e-6,
         "some_arm_motion": bool(np.any(ranges[:6] > 1e-3)),
         "gripper_motion": bool(ranges[6] > 1e-4),
     }
@@ -130,6 +143,7 @@ def quality_flags(result: Dict[str, Any]) -> Dict[str, bool]:
 
 
 def print_report(result: Dict[str, Any]) -> None:
+    active_side = result.get("active_side", "left")
     print(f"episode: {result['path']}")
     print(f"qpos: shape={tuple(result['qpos_shape'])}, dtype={result['qpos_dtype']}")
     print(f"action: shape={tuple(result['action_shape'])}, dtype={result['action_dtype']}")
@@ -139,10 +153,11 @@ def print_report(result: Dict[str, Any]) -> None:
             f"mean={result['dt_ms_mean']:.3f}, min={result['dt_ms_min']:.3f}, "
             f"max={result['dt_ms_max']:.3f}, std={result['dt_ms_std']:.3f}"
         )
-    print(f"right side max abs: {result['right_side_max_abs']:.6f}")
+    print(f"active side: {active_side}")
+    print(f"inactive side max abs: {result['inactive_side_max_abs']:.6f}")
     print(f"action shift max err: {result['action_shift_max_err']:.9f}")
-    print("left ranges:")
-    for name, value in zip(LEFT_NAMES, result["left_range"]):
+    print(f"{active_side} ranges:")
+    for name, value in zip(SIDE_NAMES, result[f"{active_side}_range"]):
         print(f"  {name}: {value:.6f}")
     if "image" in result:
         image = result["image"]

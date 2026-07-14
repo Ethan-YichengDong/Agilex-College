@@ -21,7 +21,7 @@ DATASET_DIR="${DATASET_DIR:-${SCRIPT_DIR}/data/raw}"
 # 任务名称，也就是 data/raw 下的一级子目录名。
 # 例如 TASK=press_ring 会保存到：
 #   piper/piper_act_dataset/data/raw/press_ring/
-TASK="${TASK:-test_final}"
+TASK="${TASK:-click_silver_bell_left}"
 
 # 起始 episode 编号。
 # 留空时自动选择下一个可用编号；例如已有 episode_0，则自动从 episode_1 开始。
@@ -30,7 +30,7 @@ EPISODE_IDX="${EPISODE_IDX:-}"
 
 # 本次连续采集的 episode 数量。
 # 每个 episode 都会单独提示按 Enter 开始，并单独保存为一个 HDF5 文件。
-NUM_EPISODES="${NUM_EPISODES:-5}"
+NUM_EPISODES="${NUM_EPISODES:-30}"
 
 # 每个 episode 的采集时长，单位：秒。
 # 只有在 EPISODE_LEN 为空时生效；最终帧数约为 DURATION * FPS。
@@ -38,16 +38,22 @@ DURATION="${DURATION:-15}"
 
 # 每个 episode 的固定帧数。
 # 留空时由 DURATION 和 FPS 自动计算；设置后会覆盖 DURATION。
-EPISODE_LEN="${EPISODE_LEN:-}"
+EPISODE_LEN="${EPISODE_LEN:-400}"
 
 # 采样频率，单位：Hz。
 # 目标是 50Hz；如果实际记录速度低于 50Hz，说明采样循环或 CAN/SDK 反馈链路跟不上。
 FPS="${FPS:-50}"
 
 # 机械臂对数模式。
-# single：单臂采集，只使用 left 7 维，right 7 维补 0。
+# single：单臂采集，只采集一对主从臂；具体写入 left 7 维还是 right 7 维
+#         由 SINGLE_ARM_SIDE 控制，另一侧补 0。
 # dual：双臂采集，需要同时设置 LEFT_SLAVE_CAN 和 RIGHT_SLAVE_CAN。
 PAIR_MODE="${PAIR_MODE:-single}"
+
+# single 模式下写入 ACT 14 维向量的哪一侧。
+# left：默认，兼容已有数据集。
+# right：单右臂采集，left 7 维补 0，right 7 维保存真实数据。
+SINGLE_ARM_SIDE="${SINGLE_ARM_SIDE:-left}"
 
 # /action 字段来源。
 # slave_next_qpos：默认值，action[t] = qpos[t+1]，适合轨迹模仿学习。
@@ -102,10 +108,10 @@ CAMERAS="cam_high=/dev/video10 cam_left_wrist=/dev/video4 cam_right_wrist=/dev/v
 NO_CAMERA="${NO_CAMERA:-0}"
 
 # 保存到 HDF5 的图像宽度，单位：像素。
-IMAGE_WIDTH="${IMAGE_WIDTH:-320}"
+IMAGE_WIDTH="${IMAGE_WIDTH:-640}"
 
 # 保存到 HDF5 的图像高度，单位：像素。
-IMAGE_HEIGHT="${IMAGE_HEIGHT:-240}"
+IMAGE_HEIGHT="${IMAGE_HEIGHT:-480}"
 
 # 请求摄像头帧率，单位：Hz。你的相机支持 30/60Hz 时，默认请求 60Hz，
 # 避免 30Hz 摄像头阻塞 50Hz 机械臂采样循环。
@@ -141,7 +147,7 @@ PARK_METHOD="${PARK_METHOD:-master_home}"
 MASTER_HOME_CAN="${MASTER_HOME_CAN:-${CAN:-${LEFT_SLAVE_CAN}}}"
 
 # 发送 ReqMasterArmMoveToHome(2) 后等待多久再恢复主从模式。
-MASTER_HOME_WAIT="${MASTER_HOME_WAIT:-6}"
+MASTER_HOME_WAIT="${MASTER_HOME_WAIT:-5}"
 
 # master_home 回零后是否发送 ReqMasterArmMoveToHome(0) 恢复主从模式。
 MASTER_HOME_RESTORE="${MASTER_HOME_RESTORE:-1}"
@@ -215,6 +221,7 @@ ARGS=(
   "--duration" "${DURATION}"
   "--fps" "${FPS}"
   "--pair-mode" "${PAIR_MODE}"
+  "--single-arm-side" "${SINGLE_ARM_SIDE}"
   "--action-source" "${ACTION_SOURCE}"
   "--left-slave-can" "${LEFT_SLAVE_CAN}"
   "--image-width" "${IMAGE_WIDTH}"

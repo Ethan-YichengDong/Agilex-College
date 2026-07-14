@@ -31,9 +31,9 @@ That default matches a trajectory-only VLA fine-tuning dataset. Reading master
 control frames is still available as an optional mode, but it is not the default.
 
 Use `--pair-mode single` for one master-slave pair. The active pair is stored in
-the left 7 dimensions and the right 7 dimensions are zero-filled. Use
-`--pair-mode dual` for two master-slave pairs; both left and right slave CAN
-ports are required.
+the side selected by `--single-arm-side` and the other 7 dimensions are
+zero-filled. Use `--pair-mode dual` for two master-slave pairs; both left and
+right slave CAN ports are required.
 """
 
 import argparse
@@ -181,6 +181,32 @@ def bimanual_vector(
     return np.concatenate([left if left is not None else zeros, right if right is not None else zeros]).astype(np.float32)
 
 
+def monotonic_ns() -> int:
+    if hasattr(time, "monotonic_ns"):
+        return time.monotonic_ns()
+    return int(time.monotonic() * 1e9)
+
+
+def single_side_value(args: argparse.Namespace) -> str:
+    return getattr(args, "single_arm_side", "left")
+
+
+def select_single_can(args: argparse.Namespace, left_name: Optional[str], right_name: Optional[str], label: str) -> Tuple[Optional[str], Optional[str]]:
+    if args.pair_mode != "single":
+        return left_name, right_name
+
+    side = single_side_value(args)
+    if side == "left":
+        if left_name:
+            return left_name, None
+        return right_name, None
+    if side == "right":
+        if right_name:
+            return None, right_name
+        return None, left_name
+    raise ValueError(f"unsupported single-arm side for {label}: {side}")
+
+
 def episode_file_path(dataset_dir: str, episode_idx: int) -> str:
     episode_name = f"episode_{episode_idx}"
     return os.path.join(dataset_dir, episode_name, f"{episode_name}.hdf5")
@@ -189,7 +215,12 @@ def episode_file_path(dataset_dir: str, episode_idx: int) -> str:
 def next_episode_index(dataset_dir: str) -> int:
     os.makedirs(dataset_dir, exist_ok=True)
     for idx in range(100000):
-        if not os.path.exists(episode_file_path(dataset_dir, idx)):
+        candidate_paths = [
+            episode_file_path(dataset_dir, idx),
+            episode_file_path(os.path.join(dataset_dir, "successful"), idx),
+            episode_file_path(os.path.join(dataset_dir, "fail"), idx),
+        ]
+        if not any(os.path.exists(path) for path in candidate_paths):
             return idx
     raise RuntimeError("too many episodes in dataset directory")
 
@@ -218,6 +249,7 @@ def save_episode(
     target_fps: float,
     action_source: str,
     pair_mode: str,
+    single_arm_side: str,
 ) -> None:
     with h5py.File(path, "w", rdcc_nbytes=1024**2 * 2) as root:
         root.attrs["sim"] = False
@@ -228,6 +260,7 @@ def save_episode(
         root.attrs["vector_order"] = "left_j1..j6,left_gripper,right_j1..j6,right_gripper"
         root.attrs["action_source"] = action_source
         root.attrs["pair_mode"] = pair_mode
+        root.attrs["single_arm_side"] = single_arm_side
 
         obs = root.create_group("observations")
         obs.create_dataset("qpos", data=qpos, dtype="float32")
@@ -281,11 +314,14 @@ def build_action_from_slave_qpos(qpos: np.ndarray, action_source: str) -> np.nda
 
 
 def capture_episode(args: argparse.Namespace) -> str:
-    left_slave = connect_piper(args.left_slave_can) if args.left_slave_can else None
-    right_slave = connect_piper(args.right_slave_can) if args.right_slave_can else None
+    left_slave_can, right_slave_can = select_single_can(args, args.left_slave_can, args.right_slave_can, "slave")
+    left_master_can, right_master_can = select_single_can(args, args.left_master_can, args.right_master_can, "master")
+
+    left_slave = connect_piper(left_slave_can) if left_slave_can else None
+    right_slave = connect_piper(right_slave_can) if right_slave_can else None
     if args.action_source == "master_ctrl":
-        left_master = connect_piper(args.left_master_can) if args.left_master_can else left_slave
-        right_master = connect_piper(args.right_master_can) if args.right_master_can else right_slave
+        left_master = connect_piper(left_master_can) if left_master_can else left_slave
+        right_master = connect_piper(right_master_can) if right_master_can else right_slave
     else:
         left_master = None
         right_master = None
@@ -314,7 +350,7 @@ def capture_episode(args: argparse.Namespace) -> str:
             now = time.monotonic()
             if now < next_tick:
                 time.sleep(next_tick - now)
-            sample_time_ns = time.monotonic_ns()
+            sample_time_ns = monotonic_ns()
 
             left_qpos = side_vector(joint_feedback_rad(left_slave), gripper_feedback_m(left_slave)) if left_slave else None
             right_qpos = side_vector(joint_feedback_rad(right_slave), gripper_feedback_m(right_slave)) if right_slave else None
@@ -368,6 +404,7 @@ def capture_episode(args: argparse.Namespace) -> str:
         args.fps,
         args.action_source,
         args.pair_mode,
+        single_side_value(args),
     )
     return episode_path
 
@@ -384,9 +421,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["single", "dual"],
         default="single",
         help=(
-            "single records one master-slave pair into the left 7 dimensions "
-            "and zero-fills the right side. dual records two master-slave pairs "
+            "single records one master-slave pair into --single-arm-side "
+            "and zero-fills the other side. dual records two master-slave pairs "
             "and requires both --left-slave-can and --right-slave-can."
+        ),
+    )
+    parser.add_argument(
+        "--single-arm-side",
+        choices=["left", "right"],
+        default="left",
+        help=(
+            "ACT vector side used when --pair-mode single. Defaults to left for "
+            "backward compatibility; use right to record a single right-arm dataset."
         ),
     )
     parser.add_argument(
@@ -423,10 +469,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_arg_parser().parse_args()
     if args.pair_mode == "single":
-        if not args.left_slave_can:
-            raise SystemExit("--pair-mode single requires --left-slave-can.")
-        if args.right_slave_can:
-            raise SystemExit("--pair-mode single should not set --right-slave-can. Use --pair-mode dual for two pairs.")
+        if not args.left_slave_can and not args.right_slave_can:
+            raise SystemExit("--pair-mode single requires one slave CAN port.")
+        if args.left_slave_can and args.right_slave_can:
+            raise SystemExit("--pair-mode single should set only one slave CAN port. Use --pair-mode dual for two pairs.")
     if args.pair_mode == "dual":
         if not args.left_slave_can or not args.right_slave_can:
             raise SystemExit("--pair-mode dual requires both --left-slave-can and --right-slave-can.")

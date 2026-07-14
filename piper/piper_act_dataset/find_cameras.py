@@ -31,6 +31,55 @@ def stable_names(device: str) -> List[str]:
     return sorted(names)
 
 
+def usb_speed_label(speed_mbps: Optional[float]) -> str:
+    if speed_mbps is None:
+        return "unknown"
+    if speed_mbps >= 20000:
+        return "USB3.2 Gen 2x2"
+    if speed_mbps >= 10000:
+        return "USB3.2 Gen 2"
+    if speed_mbps >= 5000:
+        return "USB3.2 Gen 1 / USB3.x"
+    if speed_mbps >= 480:
+        return "USB2.0 High-Speed"
+    if speed_mbps >= 12:
+        return "USB1.1 Full-Speed"
+    if speed_mbps >= 1.5:
+        return "USB1.x Low-Speed"
+    return f"{speed_mbps:g} Mb/s"
+
+
+def usb_info(device: str) -> Dict[str, Any]:
+    video_name = os.path.basename(device)
+    sysfs_device = os.path.realpath(os.path.join("/sys/class/video4linux", video_name, "device"))
+    info: Dict[str, Any] = {
+        "sysfs_device": sysfs_device if os.path.exists(sysfs_device) else None,
+        "usb_path": None,
+        "usb_speed_mbps": None,
+        "usb_type": "unknown",
+    }
+
+    current = sysfs_device
+    for _ in range(8):
+        speed_path = os.path.join(current, "speed")
+        if os.path.exists(speed_path):
+            try:
+                with open(speed_path, "r", encoding="utf-8") as handle:
+                    speed_mbps = float(handle.read().strip())
+            except (OSError, ValueError):
+                speed_mbps = None
+            info["usb_path"] = current
+            info["usb_speed_mbps"] = speed_mbps
+            info["usb_type"] = usb_speed_label(speed_mbps)
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+    return info
+
+
 def is_realsense_product_name(name: str) -> bool:
     return "RealSense" in name or "Depth_Camera_435" in name
 
@@ -109,6 +158,7 @@ def make_result(device: str, width: int, height: int) -> Dict[str, Any]:
         "max_value": max_value,
         "stable_names": names,
         "preferred_name": preferred_name(device, names),
+        "usb": usb_info(device),
     }
     stream_type, reason = classify(result, width, height)
     result["stream_type"] = stream_type
@@ -141,6 +191,16 @@ def print_result(result: Dict[str, Any]) -> None:
         print(f"  stable: {name}")
 
 
+def print_rgb_usb_situation(rgb: List[Dict[str, Any]]) -> None:
+    if not rgb:
+        return
+    print()
+    print("RGB camera USB situation:")
+    for item in rgb:
+        usb = item["usb"]
+        print(f"  {item['device']} -> {usb['usb_type']} ({usb['usb_speed_mbps']} Mb/s)")
+
+
 def suggest_collection(rgb: List[Dict[str, Any]], width: int, height: int) -> None:
     if len(rgb) < 3:
         print()
@@ -149,6 +209,7 @@ def suggest_collection(rgb: List[Dict[str, Any]], width: int, height: int) -> No
             print("Likely RGB streams:")
             for item in rgb:
                 print(f"  {item['device']} -> {item['preferred_name']}")
+        print_rgb_usb_situation(rgb)
         return
 
     selected = rgb[:3]
@@ -167,6 +228,7 @@ def suggest_collection(rgb: List[Dict[str, Any]], width: int, height: int) -> No
     print()
     print("Important: this selects RGB streams automatically, but it cannot know which physical camera is high/left/right.")
     print("If the views are swapped, reorder the three cam_high/cam_left_wrist/cam_right_wrist assignments.")
+    print_rgb_usb_situation(selected)
 
 
 def main() -> None:

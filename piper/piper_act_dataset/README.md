@@ -27,9 +27,14 @@ Keep raw recordings and derived formats under this directory:
 piper/piper_act_dataset/data/
 ├── raw/
 │   └── <task_name>/
-│       └── episode_0/
-│           ├── episode_0.hdf5
-│           └── episode_0.qa.json
+│       ├── successful/
+│       │   └── episode_0/
+│       │       ├── episode_0.hdf5
+│       │       └── episode_0.qa.json
+│       └── fail/
+│           └── episode_1/
+│               ├── episode_1.hdf5
+│               └── episode_1.qa.json
 ├── readable/
 │   └── <task_name>/
 │       └── episode_0/
@@ -116,8 +121,9 @@ slave arm's real executed trajectory.
 The recorder also supports two pair modes:
 
 ```text
-single  one master-slave pair; stores the active slave arm in the left 7 dims,
-        and zero-fills the right 7 dims.
+single  one master-slave pair; stores the active slave arm in SINGLE_ARM_SIDE
+        / --single-arm-side, and zero-fills the other 7 dims. The default side
+        is left for compatibility with existing datasets.
 dual    two master-slave pairs; requires left and right slave CAN ports, and
         stores both sides in the 14-D vector.
 ```
@@ -150,10 +156,12 @@ bash piper/piper_act_dataset/collect_act_episode.sh
 ```
 
 The shell wrapper calls `collect_episode.py`, which performs preflight checks,
-records one or more episodes, runs technical quality analysis, and writes a
-`episode_N.qa.json` keep/reject sidecar for each episode. Image viewing is done
-later by extracting the raw HDF5 file. Quality checks only print feedback and
-data ranges; they do not force rejection.
+records one or more episodes, runs technical quality analysis, asks for a manual
+QA decision, moves the episode into `successful/` or `fail/`, and writes a
+`episode_N.qa.json` sidecar for each episode. Pressing Enter at the QA prompt
+defaults to `successful`; entering `n` records the trajectory under `fail/`.
+Image viewing is done later by extracting the raw HDF5 file. Quality checks only
+print feedback and data ranges; they do not force rejection.
 
 Before the first episode and after each episode, the default behavior is
 `PARK_METHOD=master_home`: the launcher sends the SDK
@@ -261,9 +269,10 @@ debugging and scripted integrations, but operators should normally use
    physical following before collecting a large batch.
    If zero verification fails, the script stops before recording the next
    trajectory.
-11. Review the console quality report and `episode_N.qa.json`.
-   Keep only episodes with correct task behavior, meaningful arm motion, valid
-   timing, and usable images.
+11. Review the console quality report and answer the QA prompt. Enter or `y`
+   moves the episode to `successful/`; `n` moves it to `fail/`. Keep only
+   episodes with correct task behavior, meaningful arm motion, valid timing, and
+   usable images.
 12. Repeat collection until the task has enough kept episodes.
 13. Export readable or training-specific derived formats only after raw episodes
     are verified.
@@ -283,7 +292,19 @@ CAMERAS="cam_high=/dev/video4" \
 bash piper/piper_act_dataset/collect_act_episode.sh
 ```
 
-Fast repeated collection without the keep/reject prompt:
+Single master-slave pair, stored in the right 7 dimensions:
+
+```bash
+SINGLE_ARM_SIDE=right \
+TASK=press_ring \
+DURATION=15 \
+LEFT_SLAVE_CAN=can0 \
+CAMERAS="cam_high=/dev/video4" \
+bash piper/piper_act_dataset/collect_act_episode.sh
+```
+
+Fast repeated collection without the keep/reject prompt. Without a manual QA
+answer, episodes are sorted as `successful` by default:
 
 ```bash
 NO_ASK_KEEP=1 \
@@ -356,9 +377,10 @@ DURATION          recording length in seconds; default 15
 EPISODE_LEN       explicit frame count; overrides DURATION when set
 FPS               sampling frequency; default 50
 PAIR_MODE         single or dual; default single
+SINGLE_ARM_SIDE   left or right for PAIR_MODE=single; default left
 ACTION_SOURCE     slave_next_qpos, slave_current_qpos, or master_ctrl
 LEFT_SLAVE_CAN    default can0
-RIGHT_SLAVE_CAN   required only for PAIR_MODE=dual
+RIGHT_SLAVE_CAN   required only for PAIR_MODE=dual; optional for right-side single capture
 CAMERAS           space-separated name=device pairs
 NO_CAMERA         set to 1 to collect robot state only
 IMAGE_WIDTH       default 320
@@ -396,7 +418,7 @@ RIGHT_LEADER_CAN  right leader/input arm CAN port for dual mode
 LEFT_FOLLOWER_CAN follower/output arm CAN port for restore; defaults to LEFT_SLAVE_CAN
 RIGHT_FOLLOWER_CAN right follower/output arm CAN port for dual mode
 SKIP_PREFLIGHT    set to 1 to skip CAN/camera checks
-NO_ASK_KEEP       set to 1 for unattended repeated collection
+NO_ASK_KEEP       set to 1 for unattended repeated collection; sorts as successful
 DRY_RUN           set to 1 to check config without recording
 RUN_PILOT         set to 0 in validate_collection_pipeline.sh to stop before recording
 VALIDATION_DURATION pilot duration for validate_collection_pipeline.sh; default 3

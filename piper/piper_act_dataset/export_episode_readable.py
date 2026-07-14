@@ -1,6 +1,19 @@
-#!/usr/bin/env python3
+#!/usr/bin/env bash
 # -*- coding: utf-8 -*-
+""":"
+exec python3 "$0" "$@"
+":"""
 """
+Export a Piper ACT HDF5 episode into human-readable files.
+
+The exporter creates:
+  metadata.json        root attrs and dataset shapes/dtypes
+  summary.json         compact robot/camera statistics
+  robot_timeline.csv   one row per timestep with timestamp, qpos, qvel, action
+  images/<camera>/     every camera frame by default, or sampled frames with --sample-images
+"""
+
+DESCRIPTION = """
 Export a Piper ACT HDF5 episode into human-readable files.
 
 The exporter creates:
@@ -64,8 +77,12 @@ def default_output_dir(episode: str) -> str:
     except ValueError:
         common = ""
     if common == raw_root:
-        task_name, episode_name = infer_task_and_episode(episode_abs)
-        return os.path.join(DATA_DIR, "readable", task_name, episode_name)
+        episode_name = os.path.splitext(os.path.basename(episode_abs))[0]
+        episode_parent = os.path.dirname(episode_abs)
+        if os.path.basename(episode_parent) == episode_name:
+            episode_parent = os.path.dirname(episode_parent)
+        parent_rel = os.path.relpath(episode_parent, raw_root)
+        return os.path.join(DATA_DIR, "readable", parent_rel, episode_name)
 
     episode_base = os.path.splitext(os.path.basename(episode_abs))[0]
     return os.path.join(os.path.dirname(episode_abs), f"{episode_base}_readable")
@@ -215,7 +232,7 @@ def export_episode(episode: str, out_dir: str, sample_count: int, sample_images:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
     parser.add_argument("episode", help="Path to episode_N.hdf5")
     parser.add_argument("--out-dir", default=None, help="Directory to write readable files")
     parser.add_argument("--sample-images", action="store_true", help="Export only sampled image frames instead of every camera frame")

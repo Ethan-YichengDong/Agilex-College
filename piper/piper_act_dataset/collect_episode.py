@@ -11,6 +11,7 @@ episode can be marked keep/reject without renaming or deleting data.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 from types import SimpleNamespace
 from typing import List, Optional
@@ -34,7 +35,7 @@ def check_can_interface(can_name: Optional[str]) -> None:
         result = subprocess.run(
             ["ip", "-details", "link", "show", can_name],
             check=True,
-            text=True,
+            universal_newlines=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -74,6 +75,7 @@ def build_capture_args(args: argparse.Namespace, dataset_dir: str) -> SimpleName
         fps=args.fps,
         overwrite=args.overwrite,
         pair_mode=args.pair_mode,
+        single_arm_side=args.single_arm_side,
         action_source=args.action_source,
         left_slave_can=args.left_slave_can,
         right_slave_can=args.right_slave_can,
@@ -92,10 +94,11 @@ def sidecar_path(episode_path: str) -> str:
     return root + ".qa.json"
 
 
-def write_sidecar(episode_path: str, analysis: dict, keep: Optional[bool], note: str) -> None:
+def write_sidecar(episode_path: str, analysis: dict, keep: Optional[bool], note: str, qa_label: Optional[str]) -> None:
     payload = {
         "episode": episode_path,
         "keep": keep,
+        "qa_label": qa_label,
         "note": note,
         "analysis": analysis,
     }
@@ -106,28 +109,64 @@ def write_sidecar(episode_path: str, analysis: dict, keep: Optional[bool], note:
 
 
 def ask_keep() -> tuple:
-    answer = input("Keep this episode? [y/N]: ").strip().lower()
-    keep = answer in ("y", "yes")
+    answer = input("Keep this episode? [Y/n]: ").strip().lower()
+    keep = answer not in ("n", "no")
     note = input("Optional note: ").strip()
     return keep, note
+
+
+def qa_label_from_keep(keep: Optional[bool]) -> Optional[str]:
+    if keep is None:
+        return None
+    return "successful" if keep else "fail"
+
+
+def sorted_episode_path(episode_path: str, qa_label: str) -> str:
+    episode_dir = os.path.dirname(episode_path)
+    dataset_dir = os.path.dirname(episode_dir)
+    episode_name = os.path.basename(episode_dir)
+    return os.path.join(dataset_dir, qa_label, episode_name, os.path.basename(episode_path))
+
+
+def move_episode_to_qa_folder(episode_path: str, qa_label: Optional[str]) -> str:
+    if qa_label is None:
+        return episode_path
+
+    src_dir = os.path.dirname(episode_path)
+    final_path = sorted_episode_path(episode_path, qa_label)
+    dest_dir = os.path.dirname(final_path)
+
+    if os.path.abspath(src_dir) == os.path.abspath(dest_dir):
+        return episode_path
+    if os.path.exists(dest_dir):
+        raise FileExistsError(f"QA destination already exists: {dest_dir}")
+
+    os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
+    shutil.move(src_dir, dest_dir)
+    print(f"QA sorted episode to: {dest_dir}")
+    return final_path
 
 
 def print_quality_feedback(analysis: dict) -> None:
     flags = analysis.get("quality_flags", {})
     checks = [key for key, value in flags.items() if not value]
+    active_side = analysis.get("active_side", "left")
     print()
     print("Quality feedback:")
     if checks:
         print("  CHECK flags: {}".format(", ".join(checks)))
     else:
         print("  CHECK flags: none")
-    if all(key in analysis for key in ("left_min", "left_max", "left_range")):
-        print("  left data min/max/range:")
+    min_key = f"{active_side}_min"
+    max_key = f"{active_side}_max"
+    range_key = f"{active_side}_range"
+    if all(key in analysis for key in (min_key, max_key, range_key)):
+        print(f"  {active_side} data min/max/range:")
         for name, v_min, v_max, v_range in zip(
             ("j1", "j2", "j3", "j4", "j5", "j6", "gripper"),
-            analysis["left_min"],
-            analysis["left_max"],
-            analysis["left_range"],
+            analysis[min_key],
+            analysis[max_key],
+            analysis[range_key],
         ):
             print(f"    {name}: min={v_min:.6f}, max={v_max:.6f}, range={v_range:.6f}")
     print("  Decision is manual: keep/reject is not forced by quality checks.")
@@ -135,13 +174,20 @@ def print_quality_feedback(analysis: dict) -> None:
 
 
 def print_config(capture_args: SimpleNamespace, args: argparse.Namespace) -> None:
+    active_can = active_single_slave_can(args) if args.pair_mode == "single" else args.left_slave_can
     print("Resolved collection config:")
     print(f"  dataset_dir={capture_args.dataset_dir}")
     print(f"  num_episodes={args.num_episodes}")
     print(f"  episode_idx={capture_args.episode_idx if capture_args.episode_idx is not None else 'next available'}")
     print(f"  episode_len={capture_args.episode_len}")
     print(f"  fps={capture_args.fps}")
-    print(f"  can={capture_args.left_slave_can}")
+    print(f"  pair_mode={capture_args.pair_mode}")
+    if capture_args.pair_mode == "single":
+        print(f"  single_arm_side={capture_args.single_arm_side}")
+        print(f"  can={active_can}")
+    else:
+        print(f"  left_can={capture_args.left_slave_can}")
+        print(f"  right_can={capture_args.right_slave_can}")
     print(f"  cameras={capture_args.camera or 'none'}")
     print(f"  image_size={capture_args.image_width}x{capture_args.image_height}")
     print(f"  camera_fps={capture_args.camera_fps}")
@@ -194,7 +240,7 @@ def reset_to_start_pose(args: argparse.Namespace, reason: str) -> None:
     if args.park_method != "can_park":
         raise RuntimeError(f"unsupported park method: {args.park_method}")
 
-    can_names = [args.left_slave_can]
+    can_names = [active_single_slave_can(args) if args.pair_mode == "single" else args.left_slave_can]
     if args.pair_mode == "dual":
         can_names.append(args.right_slave_can)
     can_names = [name for name in can_names if name]
@@ -233,6 +279,14 @@ def restore_leader_follower_after_park(args: argparse.Namespace) -> None:
     print()
     print("Restoring leader-follower teaching mode after parking.")
     restore_pairs(pairs, args.restore_dry_run)
+
+
+def active_single_slave_can(args: argparse.Namespace) -> Optional[str]:
+    if args.single_arm_side == "right" and args.right_slave_can:
+        return args.right_slave_can
+    if args.single_arm_side == "left" and args.left_slave_can:
+        return args.left_slave_can
+    return args.left_slave_can or args.right_slave_can
 
 
 def validate_restore_config(args: argparse.Namespace) -> None:
@@ -284,11 +338,14 @@ def collect_one_episode(args: argparse.Namespace, dataset_dir: str, offset: int)
     print_quality_feedback(analysis)
 
     if args.no_ask_keep:
-        keep = None
+        keep = True
         note = ""
     else:
         keep, note = ask_keep()
-    write_sidecar(episode_path, analysis, keep, note)
+    qa_label = qa_label_from_keep(keep)
+    final_episode_path = move_episode_to_qa_folder(episode_path, qa_label)
+    analysis["path"] = final_episode_path
+    write_sidecar(final_episode_path, analysis, keep, note, qa_label)
 
     if args.park_after:
         try:
@@ -298,12 +355,12 @@ def collect_one_episode(args: argparse.Namespace, dataset_dir: str, offset: int)
         except Exception as exc:
             print()
             print("POST-EPISODE RESET FAILED.")
-            print(f"  Episode was already saved: {episode_path}")
-            print(f"  QA sidecar was already written: {sidecar_path(episode_path)}")
+            print(f"  Episode was already saved: {final_episode_path}")
+            print(f"  QA sidecar was already written: {sidecar_path(final_episode_path)}")
             print(f"  Reset error: {exc}")
             print("  Do not continue repeated collection until the arm is manually returned to the start pose.")
             raise
-    return episode_path
+    return final_episode_path
 
 
 def main() -> None:
@@ -317,6 +374,7 @@ def main() -> None:
     parser.add_argument("--fps", type=float, default=50.0)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--pair-mode", choices=["single", "dual"], default="single")
+    parser.add_argument("--single-arm-side", choices=["left", "right"], default="left")
     parser.add_argument("--action-source", choices=["slave_next_qpos", "slave_current_qpos", "master_ctrl"], default="slave_next_qpos")
     parser.add_argument("--left-slave-can", default="can0")
     parser.add_argument("--right-slave-can", default=None)
@@ -364,7 +422,7 @@ def main() -> None:
     if args.right_follower_can is None:
         args.right_follower_can = args.right_slave_can
     if args.master_home_can is None:
-        args.master_home_can = args.left_slave_can
+        args.master_home_can = active_single_slave_can(args) if args.pair_mode == "single" else args.left_slave_can
     args.master_home_restore = not args.no_master_home_restore
     validate_restore_config(args)
 
@@ -373,7 +431,10 @@ def main() -> None:
     print_config(capture_args, args)
 
     if not args.skip_preflight:
-        check_can_interface(args.left_slave_can)
+        if args.pair_mode == "single":
+            check_can_interface(active_single_slave_can(args))
+        else:
+            check_can_interface(args.left_slave_can)
         if args.pair_mode == "dual":
             check_can_interface(args.right_slave_can)
         if (args.prepare_before or args.park_after) and args.park_method == "master_home":
